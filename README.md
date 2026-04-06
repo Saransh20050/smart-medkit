@@ -1,10 +1,10 @@
-# Smart Medkit
+#Smart Medkit
 
 > Arduino-based medicine reminder with physical lid confirmation, on-device scheduling, and serial log analyser — no smartphone, no app, no internet required.
 
 ---
 
-## The problem it solves
+ The problem it solves
 
 Most pill reminders just beep. They have no way to know if you actually took your medicine. The Smart Medkit closes that loop: the alarm only stops when you physically open the lid, detected by a magnetic reed switch. Every event is logged to serial and can be reviewed through a companion web dashboard.
 
