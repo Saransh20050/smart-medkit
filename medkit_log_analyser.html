@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MedKit Log Analyser</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #ffffff;
+    --bg2: #f5f4f0;
+    --bg3: #eeede8;
+    --text: #1a1a18;
+    --text2: #5f5e5a;
+    --text3: #888780;
+    --border: rgba(0,0,0,0.12);
+    --border2: rgba(0,0,0,0.22);
+    --radius-md: 8px;
+    --radius-lg: 12px;
+    --font-mono: 'Menlo', 'Consolas', 'Monaco', monospace;
+    --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1c1c1a;
+      --bg2: #262624;
+      --bg3: #2e2e2b;
+      --text: #e8e7e1;
+      --text2: #9c9a92;
+      --text3: #6b6a64;
+      --border: rgba(255,255,255,0.1);
+      --border2: rgba(255,255,255,0.2);
+    }
+    .b-ok   { background:#173404 !important; color:#C0DD97 !important; }
+    .b-warn { background:#412402 !important; color:#FAC775 !important; }
+    .b-info { background:#042C53 !important; color:#B5D4F4 !important; }
+    .b-err  { background:#501313 !important; color:#F7C1C1 !important; }
+    .b-gray { background:#2C2C2A !important; color:#D3D1C7 !important; }
+    .warn-box { background:#412402 !important; border-color:#854F0B !important; color:#FAC775 !important; }
+    .ok-box   { background:#173404 !important; border-color:#3B6D11 !important; color:#C0DD97 !important; }
+  }
+
+  body {
+    font-family: var(--font-sans);
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    padding: 2rem 1rem;
+  }
+  .container { max-width: 860px; margin: 0 auto; }
+
+  h1 { font-size: 22px; font-weight: 500; color: var(--text); margin-bottom: 4px; }
+  .subtitle { font-size: 13px; color: var(--text2); margin-bottom: 1.25rem; }
+
+  textarea {
+    width: 100%;
+    height: 190px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    padding: 10px 12px;
+    border: 0.5px solid var(--border2);
+    border-radius: var(--radius-md);
+    background: var(--bg2);
+    color: var(--text);
+    resize: vertical;
+    outline: none;
+    line-height: 1.6;
+  }
+  textarea:focus { border-color: var(--text3); }
+
+  .btn-row { display: flex; gap: 10px; margin-top: 10px; }
+  button {
+    padding: 8px 20px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    border: 0.5px solid var(--border2);
+    border-radius: var(--radius-md);
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-sans);
+    transition: background 0.15s;
+  }
+  button:hover { background: var(--bg2); }
+  button:active { transform: scale(0.98); }
+  button.primary {
+    background: var(--text);
+    color: var(--bg);
+    border-color: var(--text);
+  }
+  button.primary:hover { opacity: 0.85; }
+
+  #parse-err {
+    display: none;
+    color: #A32D2D;
+    font-size: 13px;
+    margin-top: 8px;
+    padding: 8px 12px;
+    background: #FCEBEB;
+    border-radius: var(--radius-md);
+    border: 0.5px solid #F09595;
+  }
+
+  #report { display: none; margin-top: 1.75rem; }
+
+  .section-label {
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: var(--text3);
+    margin-bottom: 10px;
+  }
+
+  .card {
+    background: var(--bg);
+    border: 0.5px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 1rem 1.25rem;
+    margin-bottom: 12px;
+  }
+
+  .metric-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+  @media (max-width: 600px) {
+    .metric-grid { grid-template-columns: repeat(2, 1fr); }
+    .two-col     { grid-template-columns: 1fr !important; }
+  }
+
+  .mcard {
+    background: var(--bg2);
+    border-radius: var(--radius-md);
+    padding: 0.85rem 1rem;
+  }
+  .mlabel { font-size: 11px; color: var(--text2); margin-bottom: 4px; }
+  .mval   { font-size: 22px; font-weight: 500; color: var(--text); }
+  .msub   { font-size: 11px; color: var(--text3); margin-top: 2px; }
+
+  .badge {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 500;
+    padding: 2px 8px;
+    border-radius: var(--radius-md);
+  }
+  .b-ok   { background: #EAF3DE; color: #27500A; }
+  .b-warn { background: #FAEEDA; color: #633806; }
+  .b-info { background: #E6F1FB; color: #0C447C; }
+  .b-err  { background: #FCEBEB; color: #791F1F; }
+  .b-gray { background: #F1EFE8; color: #444441; }
+
+  .row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 7px 0;
+    border-bottom: 0.5px solid var(--border);
+  }
+  .row:last-child { border-bottom: none; }
+
+  .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; margin-top: 5px; }
+  .d-ok   { background: #639922; }
+  .d-warn { background: #BA7517; }
+  .d-info { background: #378ADD; }
+  .d-err  { background: #E24B4A; }
+  .d-gray { background: #888780; }
+
+  .tline { width: 1px; background: var(--border); flex-shrink: 0; margin: 0 3px; }
+
+  .warn-box {
+    background: #FAEEDA;
+    border: 0.5px solid #EF9F27;
+    border-radius: var(--radius-md);
+    padding: 10px 14px;
+    margin-top: 10px;
+    font-size: 12px;
+    color: #633806;
+    line-height: 1.6;
+  }
+  .ok-box {
+    background: #EAF3DE;
+    border: 0.5px solid #97C459;
+    border-radius: var(--radius-md);
+    padding: 10px 14px;
+    margin-top: 10px;
+    font-size: 12px;
+    color: #27500A;
+    line-height: 1.6;
+  }
+
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+
+  pre {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text2);
+    white-space: pre-wrap;
+    word-break: break-all;
+    line-height: 1.7;
+  }
+  .mono { font-family: var(--font-mono); }
+
+  .report-header {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    margin-bottom: 4px;
+  }
+  .report-header h2 { font-size: 18px; font-weight: 500; }
+  .report-meta { font-size: 12px; color: var(--text3); margin-bottom: 1rem; }
+
+  footer {
+    margin-top: 2rem;
+    padding-top: 1rem;
+    border-top: 0.5px solid var(--border);
+    font-size: 11px;
+    color: var(--text3);
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <h1>MedKit log analyser</h1>
+  <p class="subtitle">Paste your Arduino serial output below and click Generate report.</p>
+
+  <textarea id="logInput" placeholder="[BOOT] lastDay seeded to: 5
+[CONFIG] Entered
+[CONFIG] Slot: 1
+[CONFIG] Hour: 23
+[CONFIG] Saved slot 1 -> 23:14
+[SYSTEM] New day: 6
+[ALARM] Slot 1
+[ALARM] Done - slot 1
+..."></textarea>
+
+  <div class="btn-row">
+    <button class="primary" onclick="generate()">Generate report</button>
+    <button onclick="clearAll()">Clear</button>
+  </div>
+  <div id="parse-err">No recognisable log lines found. Make sure you paste Arduino serial output from the MedKit firmware.</div>
+
+  <div id="report"></div>
+
+  <footer>MedKit Log Analyser &nbsp;·&nbsp; Arduino 2-slot medication alarm system</footer>
+</div>
+
+<script>
+function clearAll() {
+  document.getElementById('logInput').value = '';
+  document.getElementById('report').style.display = 'none';
+  document.getElementById('parse-err').style.display = 'none';
+}
+
+function generate() {
+  const raw = document.getElementById('logInput').value.trim();
+  const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
+  const events = [];
+  lines.forEach((line, idx) => {
+    const e = parseLine(line, idx);
+    if (e) events.push(e);
+  });
+
+  if (!events.length) {
+    document.getElementById('parse-err').style.display = 'block';
+    document.getElementById('report').style.display = 'none';
+    return;
+  }
+  document.getElementById('parse-err').style.display = 'none';
+
+  const stats = calcStats(events);
+  document.getElementById('report').innerHTML = buildReport(events, stats);
+  document.getElementById('report').style.display = 'block';
+  document.getElementById('report').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function parseLine(line) {
+  line = line.replace(/```/g, '').trim();
+  if (!line) return null;
+
+  if (/\[BOOT\]/i.test(line)) {
+    const m = line.match(/seeded to[:\s]+(\d+)/i);
+    return { type: 'BOOT', raw: line, day: m ? parseInt(m[1]) : '?' };
+  }
+  if (/\[RTC\]/i.test(line)) {
+    return { type: 'RTC', raw: line, reset: /reset/i.test(line) };
+  }
+  if (/\[CONFIG\] Entered/i.test(line)) {
+    return { type: 'CFG_ENTER', raw: line };
+  }
+  if (/\[CONFIG\] Slot[:\s]/i.test(line)) {
+    const m = line.match(/Slot[:\s]+(\d+)/i);
+    return { type: 'CFG_SLOT', raw: line, slot: m ? parseInt(m[1]) : '?' };
+  }
+  if (/\[CONFIG\] Hour[:\s]/i.test(line)) {
+    const m = line.match(/Hour[:\s]+(\d+)/i);
+    return { type: 'CFG_HOUR', raw: line, hour: m ? parseInt(m[1]) : '?' };
+  }
+  if (/\[CONFIG\] Saved/i.test(line)) {
+    const ms = line.match(/slot\s+(\d+)/i);
+    const mt = line.match(/(\d{1,2}):(\d{2})/);
+    return { type: 'CFG_SAVE', raw: line,
+      slot:   ms ? parseInt(ms[1]) : '?',
+      hour:   mt ? parseInt(mt[1]) : '?',
+      minute: mt ? parseInt(mt[2]) : '?' };
+  }
+  if (/\[SYSTEM\] New day/i.test(line)) {
+    const m = line.match(/New day[:\s]+(\d+)/i);
+    return { type: 'NEW_DAY', raw: line, day: m ? parseInt(m[1]) : '?' };
+  }
+  if (/\[ALARM\] Reed HIGH/i.test(line)) {
+    return { type: 'ALARM_REED_WARN', raw: line };
+  }
+  if (/\[ALARM\] Slot/i.test(line) && !/Done/i.test(line)) {
+    const m = line.match(/Slot\s+(\d+)/i);
+    return { type: 'ALARM_START', raw: line, slot: m ? parseInt(m[1]) : '?' };
+  }
+  if (/\[ALARM\] Done/i.test(line)) {
+    const m = line.match(/slot\s+(\d+)/i);
+    return { type: 'ALARM_DONE', raw: line, slot: m ? parseInt(m[1]) : '?' };
+  }
+  if (/System Ready|Boot OK/i.test(line)) {
+    return { type: 'READY', raw: line };
+  }
+  return { type: 'UNKNOWN', raw: line };
+}
+
+function calcStats(events) {
+  const s = {
+    booted: false, rtcReset: false, bootDay: null,
+    configs: [], alarms: [],
+    newDays: 0, newDayVals: [],
+    reedWarnings: 0, slotTimes: {}, alarmCount: {}
+  };
+
+  let pendingAlarmSlot = null;
+
+  events.forEach(e => {
+    if (e.type === 'BOOT')           { s.booted = true; s.bootDay = e.day; }
+    if (e.type === 'RTC' && e.reset)   s.rtcReset = true;
+    if (e.type === 'NEW_DAY')        { s.newDays++; s.newDayVals.push(e.day); }
+    if (e.type === 'ALARM_REED_WARN')  s.reedWarnings++;
+    if (e.type === 'CFG_SAVE')         s.configs.push(e);
+    if (e.type === 'ALARM_START')      pendingAlarmSlot = e.slot;
+    if (e.type === 'ALARM_DONE') {
+      s.alarms.push({ slot: e.slot });
+      pendingAlarmSlot = null;
+    }
+  });
+
+  s.configs.forEach(c => { s.slotTimes[c.slot] = { h: c.hour, m: c.minute }; });
+  s.alarms.forEach(a => { s.alarmCount[a.slot] = (s.alarmCount[a.slot] || 0) + 1; });
+
+  s.excessiveResets = s.newDays > 3;
+  s.hasReedWarning  = s.reedWarnings > 0;
+
+  return s;
+}
+
+function pad2(n) { return String(n).padStart(2, '0'); }
+
+function buildReport(events, s) {
+  const totalAlarms  = s.alarms.length;
+  const totalConfigs = s.configs.length;
+
+  const healthBadge = (s.excessiveResets || s.hasReedWarning || s.rtcReset)
+    ? '<span class="badge b-warn">Needs attention</span>'
+    : '<span class="badge b-ok">Healthy</span>';
+
+  const metricCards = `
+    <div class="metric-grid">
+      <div class="mcard">
+        <div class="mlabel">Alarms fired</div>
+        <div class="mval">${totalAlarms}</div>
+        <div class="msub">${Object.keys(s.alarmCount).length} slot(s) active</div>
+      </div>
+      <div class="mcard">
+        <div class="mlabel">Configs saved</div>
+        <div class="mval">${totalConfigs}</div>
+        <div class="msub">${Object.keys(s.slotTimes).length} slot(s) set</div>
+      </div>
+      <div class="mcard">
+        <div class="mlabel">Day resets</div>
+        <div class="mval" style="color:${s.excessiveResets ? '#BA7517' : 'inherit'};">${s.newDays}</div>
+        <div class="msub">${s.excessiveResets ? 'More than expected' : 'Normal'}</div>
+      </div>
+      <div class="mcard">
+        <div class="mlabel">Boot day</div>
+        <div class="mval" style="font-size:15px;padding-top:5px;">${s.bootDay !== null ? 'Day ' + s.bootDay : '—'}</div>
+        <div class="msub">${s.rtcReset ? 'RTC was reset' : 'RTC OK'}</div>
+      </div>
+    </div>`;
+
+  let slotRows = '';
+  const slots = Object.keys(s.slotTimes);
+  if (slots.length) {
+    slots.forEach(sl => {
+      const t     = s.slotTimes[sl];
+      const fires = s.alarmCount[sl] || 0;
+      slotRows += `
+        <div class="row">
+          <div>
+            <span style="font-size:13px;font-weight:500;">Slot ${sl}</span>
+            <span style="font-size:12px;color:var(--text2);margin-left:8px;">alarm time</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <span class="mono" style="font-size:16px;font-weight:500;">${pad2(t.h)}:${pad2(t.m)}</span>
+            <span class="badge b-ok">Saved</span>
+            <span class="badge b-info">${fires} fire${fires !== 1 ? 's' : ''}</span>
+          </div>
+        </div>`;
+    });
+  } else {
+    slotRows = '<div style="font-size:13px;color:var(--text3);padding:8px 0;">No config saves found.</div>';
+  }
+
+  let alarmRows = '';
+  if (s.alarms.length) {
+    const fireNum = {};
+    s.alarms.forEach((a, i) => {
+      fireNum[a.slot] = (fireNum[a.slot] || 0) + 1;
+      alarmRows += `
+        <div class="row">
+          <div style="font-size:13px;">
+            Slot ${a.slot}
+            <span style="color:var(--text3);margin-left:4px;">fire #${fireNum[a.slot]}</span>
+          </div>
+          <span class="badge b-ok">Completed</span>
+        </div>`;
+    });
+  } else {
+    alarmRows = '<div style="font-size:13px;color:var(--text3);padding:8px 0;">No completed alarms found.</div>';
+  }
+
+  const typeMap = {
+    'BOOT':            ['d-info', 'System boot',       e => `lastDay seeded to day ${e.day}`],
+    'RTC':             ['d-info', 'RTC event',          e => e.reset ? 'RTC time reset to compile time — check battery' : e.raw],
+    'READY':           ['d-ok',   'System ready',       e => 'Firmware initialised successfully'],
+    'CFG_ENTER':       ['d-info', 'Config entered',     e => 'User pressed Next to enter config mode'],
+    'CFG_SLOT':        ['d-info', 'Slot selected',      e => `Slot ${e.slot} chosen for configuration`],
+    'CFG_HOUR':        ['d-gray', 'Hour set',           e => `Hour value: ${pad2(e.hour)}`],
+    'CFG_SAVE':        ['d-ok',   'Config saved',       e => `Slot ${e.slot} alarm saved → ${pad2(e.hour)}:${pad2(e.minute)}`],
+    'NEW_DAY':         ['d-warn', 'New-day reset',      e => `Day changed to ${e.day} — medTaken + alarmFired cleared`],
+    'ALARM_START':     ['d-ok',   'Alarm triggered',    e => `Slot ${e.slot} — buzzer + LED activated`],
+    'ALARM_DONE':      ['d-ok',   'Alarm dismissed',    e => `Slot ${e.slot} — lid opened, med taken`],
+    'ALARM_REED_WARN': ['d-warn', 'Reed warning',       e => 'Reed HIGH at alarm start — fallback buzz mode used'],
+    'UNKNOWN':         ['d-gray', 'Other',              e => e.raw],
+  };
+
+  const filtered = events.filter(e => e.type !== 'UNKNOWN' || e.raw.length > 2);
+  let timeline = '';
+  filtered.forEach((e, i) => {
+    const isLast = i === filtered.length - 1;
+    const [dotCls, title, desc] = typeMap[e.type] || ['d-gray', 'Event', ev => ev.raw];
+    timeline += `
+      <div style="display:flex;gap:12px;padding-bottom:${isLast ? '0' : '12px'};">
+        <div style="display:flex;flex-direction:column;align-items:center;">
+          <div class="dot ${dotCls}"></div>
+          ${!isLast ? '<div class="tline" style="flex:1;min-height:20px;"></div>' : ''}
+        </div>
+        <div>
+          <div style="font-size:13px;font-weight:500;">${title}</div>
+          <div style="font-size:12px;color:var(--text2);">${desc(e)}</div>
+        </div>
+      </div>`;
+  });
+
+  let healthNotes = '';
+  if (s.excessiveResets) {
+    healthNotes += `<div class="warn-box">
+      <strong>Excessive new-day resets (${s.newDays}x)</strong><br>
+      More resets than expected for a single session. This usually means the RTC <span class="mono">day()</span> value changed multiple times — possibly due to unstable reads or the device running across midnight repeatedly. Consider adding a minimum-interval guard so the reset can only fire once per hour.
+    </div>`;
+  }
+  if (s.hasReedWarning) {
+    healthNotes += `<div class="warn-box" style="margin-top:8px;">
+      <strong>Reed switch read HIGH at alarm time (${s.reedWarnings}x)</strong><br>
+      The reed sensor was open (or disconnected) when the alarm fired. The system fell back to fixed-cycle buzzing correctly. Check the magnet is seated firmly on the lid and the reed wires are secure on the breadboard.
+    </div>`;
+  }
+  if (s.rtcReset) {
+    healthNotes += `<div class="warn-box" style="margin-top:8px;">
+      <strong>RTC lost power and was reset</strong><br>
+      The RTC coin cell battery may be flat or missing. Time was restored from compile time — verify the clock is showing the correct current time on the LCD.
+    </div>`;
+  }
+  if (!s.excessiveResets && !s.hasReedWarning && !s.rtcReset) {
+    healthNotes = `<div class="ok-box">No issues detected. All alarms completed normally and the RTC was stable throughout the session.</div>`;
+  }
+
+  return `
+    <div class="report-header">
+      <h2>Session report</h2>
+      ${healthBadge}
+    </div>
+    <p class="report-meta">${events.length} log lines parsed &nbsp;·&nbsp; ${filtered.length} events rendered</p>
+
+    ${metricCards}
+
+    <div class="two-col">
+      <div class="card">
+        <div class="section-label">Slot alarm times</div>
+        ${slotRows}
+      </div>
+      <div class="card">
+        <div class="section-label">Alarm outcomes</div>
+        ${alarmRows}
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="section-label">Event timeline</div>
+      ${timeline}
+    </div>
+
+    <div class="card">
+      <div class="section-label">Health diagnostics</div>
+      ${healthNotes}
+    </div>
+
+    <div class="card">
+      <div class="section-label">Raw log</div>
+      <pre>${events.map(e => e.raw).join('\n')}</pre>
+    </div>`;
+}
+</script>
+</body>
+</html>

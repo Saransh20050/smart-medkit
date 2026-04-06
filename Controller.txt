@@ -1,0 +1,395 @@
+#include <Wire.h>
+#include <RTClib.h>
+#include <LiquidCrystal.h>
+
+// ── LCD: RS=12 EN=11 D4=5 D5=4 D6=3 D7=2 ───────────
+LiquidCrystal lcd(12, 11, 5, 4, 3, 2);
+RTC_DS3231 rtc;
+
+// ── Pins ─────────────────────────────────────────────
+#define PIN_BUZZER  7
+#define BTN_NEXT   13
+#define BTN_CHANGE 10
+
+const int NUM_SLOTS = 2;
+const int LED_PINS[NUM_SLOTS]  = {8,  9};
+const int REED_PINS[NUM_SLOTS] = {A1, A2};
+
+// ── Alarm times ──────────────────────────────────────
+int alarmHour[NUM_SLOTS]   = {6, 21};
+int alarmMinute[NUM_SLOTS] = {0,  0};
+
+// ── Runtime state ────────────────────────────────────
+bool medTaken[NUM_SLOTS]   = {false, false};
+bool alarmFired[NUM_SLOTS] = {false, false};
+
+uint8_t lastDay    = 0;   // 0 = unset sentinel (valid days are 1-31)
+int     lastHour   = -1;
+int     lastMinute = -1;
+
+// ── Config ───────────────────────────────────────────
+bool configMode = false;
+int  configStep = 0;
+int  cfgSlot    = 0;
+int  cfgHour    = 0;
+int  cfgMinute  = 0;
+
+// ── Button debounce ──────────────────────────────────
+bool          lastBtnNext   = HIGH;
+bool          lastBtnChange = HIGH;
+unsigned long lastNextMs    = 0;
+unsigned long lastChangeMs  = 0;
+const unsigned long DEBOUNCE_MS = 280;
+
+// ── LCD state ─────────────────────────────────────────
+// Track what's on screen to avoid unnecessary lcd.clear()
+int  lcdMode        = -1;   // 0=normal, 1=config step0, 2=step1, 3=step2
+int  lcdLastH       = -1;
+int  lcdLastM       = -1;
+int  lcdLastS       = -1;
+int  lcdLastA0H     = -1;
+int  lcdLastA0M     = -1;
+int  lcdLastA1H     = -1;
+int  lcdLastA1M     = -1;
+
+// ─────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────
+void lcdPrint2(int val) {
+  if (val < 10) lcd.print("0");
+  lcd.print(val);
+}
+
+// Print exactly 16 chars to a row (pass a string, pad/truncate to 16)
+void lcdRow(int row, const char* text) {
+  lcd.setCursor(0, row);
+  int len = strlen(text);
+  lcd.print(text);
+  for (int i = len; i < 16; i++) lcd.print(' ');
+}
+
+// ─────────────────────────────────────────────────────
+bool buttonPressed(int pin, bool &lastState, unsigned long &lastMs) {
+  bool cur = (digitalRead(pin) == LOW);
+  if (cur && !lastState) {
+    lastState = cur;
+    unsigned long now = millis();
+    if (now - lastMs > DEBOUNCE_MS) {
+      lastMs = now;
+      return true;
+    }
+    return false;
+  }
+  lastState = cur;
+  return false;
+}
+
+// ─────────────────────────────────────────────────────
+void setup() {
+  Serial.begin(9600);
+
+  pinMode(PIN_BUZZER, OUTPUT);
+  noTone(PIN_BUZZER);
+  pinMode(BTN_NEXT,   INPUT_PULLUP);
+  pinMode(BTN_CHANGE, INPUT_PULLUP);
+  for (int i = 0; i < NUM_SLOTS; i++) {
+    pinMode(LED_PINS[i],  OUTPUT);
+    digitalWrite(LED_PINS[i], LOW);
+    pinMode(REED_PINS[i], INPUT_PULLUP);
+  }
+
+  lcd.begin(16, 2);
+  Wire.begin();
+
+  if (!rtc.begin()) {
+    lcd.clear();
+    lcdRow(0, "RTC NOT FOUND!");
+    lcdRow(1, "Check wiring.");
+    while (1);
+  }
+  if (rtc.lostPower()) {
+    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+    Serial.println("[RTC] Reset to compile time");
+  }
+
+  // Seed lastDay — read RTC a few times until we get a stable valid day
+  uint8_t d = 0;
+  for (int attempt = 0; attempt < 5 && (d < 1 || d > 31); attempt++) {
+    delay(10);
+    d = rtc.now().day();
+  }
+  lastDay = (d >= 1 && d <= 31) ? d : 1;  // safe fallback
+  Serial.print("[BOOT] lastDay seeded to: ");
+  Serial.println(lastDay);
+
+  lcd.clear();
+  lcdRow(0, " MedKit  Ready  ");
+  lcdRow(1, "  2-slot alarm  ");
+  delay(2000);
+  lcd.clear();
+  lcdMode = -1;  // force fresh draw on first normal loop
+}
+
+// ─────────────────────────────────────────────────────
+void loop() {
+  bool nextPr   = buttonPressed(BTN_NEXT,   lastBtnNext,   lastNextMs);
+  bool changePr = buttonPressed(BTN_CHANGE, lastBtnChange, lastChangeMs);
+
+  // ── Enter config ─────────────────────────────────
+  if (nextPr && !configMode) {
+    configMode = true;
+    configStep = 0;
+    cfgSlot    = 0;
+    lcdMode    = -1;   // force config screen redraw
+    lcd.clear();
+    Serial.println("[CONFIG] Entered");
+    return;
+  }
+
+  if (configMode) {
+    runConfig(nextPr, changePr);
+    return;
+  }
+
+  // ── Normal mode ──────────────────────────────────
+  DateTime now = rtc.now();
+  uint8_t  d   = now.day();
+  int      h   = now.hour();
+  int      m   = now.minute();
+  int      s   = now.second();
+
+  // ── New-day reset — guarded against invalid RTC reads ──
+  // Only act if d is a real calendar day AND it differs from lastDay
+  if (d >= 1 && d <= 31 && d != lastDay) {
+    lastDay    = d;
+    lastHour   = -1;
+    lastMinute = -1;
+    for (int i = 0; i < NUM_SLOTS; i++) {
+      medTaken[i]   = false;
+      alarmFired[i] = false;
+    }
+    Serial.print("[SYSTEM] New day: "); Serial.println(d);
+    // Do NOT touch LCD here — displayNormal will handle it
+  }
+
+  // ── Per-minute: clear alarmFired for past alarm minutes ──
+  if (m != lastMinute) {
+    lastMinute = m;
+    lastHour   = h;
+    for (int i = 0; i < NUM_SLOTS; i++) {
+      bool isNow = (h == alarmHour[i] && m == alarmMinute[i]);
+      if (!isNow) alarmFired[i] = false;
+    }
+  }
+
+  // ── Check alarms ─────────────────────────────────
+  for (int i = 0; i < NUM_SLOTS; i++) {
+    if (h == alarmHour[i]   &&
+        m == alarmMinute[i] &&
+        !alarmFired[i]      &&
+        !medTaken[i]) {
+      alarmFired[i] = true;
+      runAlarm(i);
+      lcd.clear();
+      lcdMode = -1;   // force normal screen redraw after alarm
+      return;
+    }
+  }
+
+  // ── Normal display ───────────────────────────────
+  displayNormal(h, m, s);
+  delay(200);
+}
+
+// ─────────────────────────────────────────────────────
+// DISPLAY NORMAL
+// Only calls lcd.clear() when mode changes — never every loop
+// Updates only the characters that changed (no flicker)
+// ─────────────────────────────────────────────────────
+void displayNormal(int h, int m, int s) {
+
+  bool alarmChanged = (alarmHour[0]   != lcdLastA0H ||
+                       alarmMinute[0] != lcdLastA0M ||
+                       alarmHour[1]   != lcdLastA1H ||
+                       alarmMinute[1] != lcdLastA1M);
+
+  // Full redraw only when first entering normal mode or alarm times changed
+  if (lcdMode != 0 || alarmChanged) {
+    lcd.clear();
+    lcdMode    = 0;
+    lcdLastH   = -1;  // force time redraw too
+    lcdLastM   = -1;
+    lcdLastS   = -1;
+    lcdLastA0H = alarmHour[0];
+    lcdLastA0M = alarmMinute[0];
+    lcdLastA1H = alarmHour[1];
+    lcdLastA1M = alarmMinute[1];
+    // Draw static alarm line (line 1) once
+    lcd.setCursor(0, 1);
+    lcd.print("1>");
+    lcdPrint2(alarmHour[0]);
+    lcd.print(":");
+    lcdPrint2(alarmMinute[0]);
+    lcd.print("  2>");
+    lcdPrint2(alarmHour[1]);
+    lcd.print(":");
+    lcdPrint2(alarmMinute[1]);
+  }
+
+  // Update time on line 0 — only rewrite digits that changed
+  if (h != lcdLastH || m != lcdLastM || s != lcdLastS) {
+    lcdLastH = h;
+    lcdLastM = m;
+    lcdLastS = s;
+    lcd.setCursor(0, 0);
+    lcd.print(" ");
+    lcdPrint2(h);
+    lcd.print(":");
+    lcdPrint2(m);
+    lcd.print(":");
+    lcdPrint2(s);
+    lcd.print("       ");
+  }
+}
+
+// ─────────────────────────────────────────────────────
+// CONFIG
+// lcdMode tracks which step is drawn — only clears on step change
+// ─────────────────────────────────────────────────────
+void runConfig(bool nextPr, bool changePr) {
+
+  int targetMode = 10 + configStep;   // 10=slot, 11=hour, 12=minute
+
+  if (lcdMode != targetMode) {
+    lcd.clear();
+    lcdMode = targetMode;
+  }
+
+  switch (configStep) {
+
+    case 0:
+      if (changePr) cfgSlot = 1 - cfgSlot;
+      lcd.setCursor(0, 0);
+      lcd.print("Which slot?     ");
+      lcd.setCursor(0, 1);
+      if (cfgSlot == 0)
+        lcd.print(">>> Slot 1      ");
+      else
+        lcd.print(">>> Slot 2      ");
+      if (nextPr) {
+        cfgHour    = alarmHour[cfgSlot];
+        cfgMinute  = alarmMinute[cfgSlot];
+        configStep = 1;
+        lcdMode    = -1;
+        Serial.print("[CONFIG] Slot: "); Serial.println(cfgSlot + 1);
+      }
+      break;
+
+    case 1:
+      if (changePr) cfgHour = (cfgHour + 1) % 24;
+      lcd.setCursor(0, 0);
+      lcd.print("Set hour:       ");
+      lcd.setCursor(0, 1);
+      lcd.print("  Hour  =  ");
+      lcdPrint2(cfgHour);
+      lcd.print("   ");
+      if (nextPr) {
+        configStep = 2;
+        lcdMode    = -1;
+        Serial.print("[CONFIG] Hour: "); Serial.println(cfgHour);
+      }
+      break;
+
+    case 2:
+      if (changePr) cfgMinute = (cfgMinute + 1) % 60;
+      lcd.setCursor(0, 0);
+      lcd.print("Set minute:     ");
+      lcd.setCursor(0, 1);
+      lcd.print("  Min   =  ");
+      lcdPrint2(cfgMinute);
+      lcd.print("   ");
+      if (nextPr) {
+        alarmHour[cfgSlot]   = cfgHour;
+        alarmMinute[cfgSlot] = cfgMinute;
+        alarmFired[cfgSlot]  = false;
+
+        Serial.print("[CONFIG] Saved slot ");
+        Serial.print(cfgSlot + 1);
+        Serial.print(" -> ");
+        Serial.print(cfgHour < 10 ? "0" : ""); Serial.print(cfgHour);
+        Serial.print(":");
+        Serial.print(cfgMinute < 10 ? "0" : ""); Serial.println(cfgMinute);
+
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("Saved! Slot ");
+        lcd.print(cfgSlot + 1);
+        lcd.print("   ");
+        lcd.setCursor(0, 1);
+        lcd.print("Alarm @ ");
+        lcdPrint2(cfgHour);
+        lcd.print(":");
+        lcdPrint2(cfgMinute);
+        lcd.print("     ");
+        delay(2500);
+
+        configMode = false;
+        lcdMode    = -1;
+        lcd.clear();
+      }
+      break;
+  }
+}
+
+// ─────────────────────────────────────────────────────
+// ALARM
+// ─────────────────────────────────────────────────────
+void runAlarm(int slot) {
+  Serial.print("[ALARM] Slot "); Serial.println(slot + 1);
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("* TAKE YOUR MED*");
+  lcd.setCursor(0, 1);
+  if (slot == 0)
+    lcd.print("    [ SLOT 1 ]  ");
+  else
+    lcd.print("    [ SLOT 2 ]  ");
+
+  bool reedClosed = (digitalRead(REED_PINS[slot]) == LOW);
+
+  if (reedClosed) {
+    // Reed present and lid closed — buzz until opened
+    while (digitalRead(REED_PINS[slot]) == LOW) {
+      digitalWrite(LED_PINS[slot], HIGH);
+      tone(PIN_BUZZER, 2000);
+      delay(400);
+      noTone(PIN_BUZZER);
+      digitalWrite(LED_PINS[slot], LOW);
+      delay(300);
+    }
+  } else {
+    // Reed absent or lid already open — buzz fixed 15 cycles
+    Serial.println("[ALARM] Reed HIGH at start — fixed buzz mode");
+    for (int c = 0; c < 15; c++) {
+      digitalWrite(LED_PINS[slot], HIGH);
+      tone(PIN_BUZZER, 2000);
+      delay(400);
+      noTone(PIN_BUZZER);
+      digitalWrite(LED_PINS[slot], LOW);
+      delay(300);
+    }
+  }
+
+  noTone(PIN_BUZZER);
+  digitalWrite(LED_PINS[slot], LOW);
+  medTaken[slot] = true;
+  Serial.print("[ALARM] Done - slot "); Serial.println(slot + 1);
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(slot == 0 ? "  Slot 1: Done! " : "  Slot 2: Done! ");
+  lcd.setCursor(0, 1);
+  lcd.print(" Med taken! :)  ");
+  delay(2500);
+}
